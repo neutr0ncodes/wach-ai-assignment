@@ -38,6 +38,7 @@ const MandateSchema = z.object({
 const ReceiptSchema = z.object({
   txHash: hexString,
   chainId: z.number().int().positive(),
+  executedAt: isoDate,
 });
 
 export const ValidationRequestPayloadSchema = z.object({
