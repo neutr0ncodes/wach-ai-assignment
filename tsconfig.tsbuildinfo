@@ -1,1 +1,1 @@
-{"root":["./src/index.ts","./src/contracts/validationregistry.ts"],"version":"5.9.3"}
+{"root":["./src/index.ts","./src/config/env.ts","./src/contracts/validationregistry.ts","./src/types/payload.ts","./src/verifiers/mandateintegrity.ts","./src/verifiers/types.ts"],"version":"5.9.3"}
