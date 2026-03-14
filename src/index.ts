@@ -4,6 +4,7 @@ import { Mandate as CoreMandate, caip10 } from "@quillai-network/mandates-core";
 import { ethers, Wallet } from "ethers";
 
 import { env } from "./config/env.js";
+import { ValidationPoller } from "./contracts/poller.js";
 import type { VerifierResult } from "./verifiers/types.js";
 import { fetchPayload } from "./router/fetchPayload.js";
 import { logger } from "./router/logger.js";
@@ -11,7 +12,6 @@ import { buildResponse, buildResponseUri } from "./router/responseBuilder.js";
 import { submitValidationResponse } from "./router/submitResponse.js";
 import { aggregateScores, getVerifiersForKind } from "./router/verifierRegistry.js";
 
-// Request deduplication
 const processedRequests = new Set<string>();
 
 async function handleValidation(
@@ -180,5 +180,28 @@ app.listen(env.PORT, () => {
     "Router service started",
   );
 });
+
+// --- On-chain poller (5.3 / 5.4) ---
+if (env.RPC_URL && env.REGISTRY_ADDRESS && env.ROUTER_ADDRESS) {
+  const provider = new ethers.JsonRpcProvider(env.RPC_URL);
+  const poller = new ValidationPoller(provider, env.REGISTRY_ADDRESS, env.ROUTER_ADDRESS);
+
+  poller.onRequest((req) => {
+    if (processedRequests.has(req.requestHash)) return;
+    processedRequests.add(req.requestHash);
+    void handleValidation(req.requestHash, req.requestURI);
+  });
+
+  poller
+    .start(env.POLL_INTERVAL_MS)
+    .catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error({ error: msg }, "Failed to start validation poller");
+    });
+} else {
+  logger.warn(
+    "On-chain poller disabled: set RPC_URL, REGISTRY_ADDRESS, and ROUTER_ADDRESS to enable",
+  );
+}
 
 export { app };
