@@ -254,6 +254,10 @@ export const mandateIntegrityVerifier: Verifier = {
      ),
     );
 
+    if (score > 80) {
+      notes.push(`Mandate integrity verified successfully with a perfect score (${score}/100).`);
+    }
+
     return {
       name: "Mandate Integrity",
       score,

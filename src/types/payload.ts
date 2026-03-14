@@ -39,6 +39,12 @@ const ReceiptSchema = z.object({
   txHash: hexString,
   chainId: z.number().int().positive(),
   executedAt: isoDate,
+  // Optional swap@1 decoded fields (populated by router or verifier from on-chain tx)
+  tokenIn: z.string().regex(/^0x[0-9a-fA-F]{40}$/).optional(),
+  tokenOut: z.string().regex(/^0x[0-9a-fA-F]{40}$/).optional(),
+  amountIn: z.string().optional(),
+  amountOut: z.string().optional(),
+  executorAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/).optional(),
 });
 
 export const ValidationRequestPayloadSchema = z.object({

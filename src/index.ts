@@ -2,6 +2,7 @@ import { Mandate as CoreMandate, caip10 } from "@quillai-network/mandates-core";
 import { Wallet } from "ethers";
 
 import { mandateIntegrityVerifier } from "./verifiers/mandateIntegrity.js";
+import { getSwapReceiptVerifier } from "./verifiers/swapReceiptVerifier.js";
 import type { MandatePayload, Receipt } from "./types/payload.js";
 
 async function main() {
@@ -83,6 +84,77 @@ async function main() {
   console.log(
     "Mandate Integrity Verifier Result (bad mandate – expected < 30):",
     JSON.stringify(badResult, null, 2),
+  );
+
+  // --- Primitive Receipt Verifier tests ---
+  const primitiveReceiptVerifier = getSwapReceiptVerifier();
+
+  // Test 1: Unsupported kind → score 0, note says MVP supports only swap@1
+  const transferMandate: MandatePayload = {
+    mandateId: "test-mandate-transfer-1",
+    version: "0.1.0",
+    client: caip10(1, clientWallet.address),
+    server: caip10(1, serverWallet.address),
+    createdAt: now.toISOString(),
+    deadline: deadline.toISOString(),
+    intent: "Transfer 100 USDC",
+    core: { kind: "transfer@1", payload: { amount: "100", token: "0xabc" } },
+    signatures: {},
+  };
+
+  const unsupportedResult = await primitiveReceiptVerifier.verify(
+    transferMandate,
+    receipt,
+  );
+
+  // eslint-disable-next-line no-console
+  console.log(
+    "Primitive Receipt Verifier (unsupported kind transfer@1 – expected score 0):",
+    JSON.stringify(unsupportedResult, null, 2),
+  );
+
+  // Test 2: swap@1 mandate + receipt with fake txHash → on-chain fetch fails, score 0
+  const swapMandate: MandatePayload = {
+    mandateId: "test-mandate-swap-1",
+    version: "0.1.0",
+    client: caip10(1, clientWallet.address),
+    server: caip10(1, serverWallet.address),
+    createdAt: now.toISOString(),
+    deadline: deadline.toISOString(),
+    intent: "Swap 100 USDC for WBTC",
+    core: {
+      kind: "swap@1",
+      payload: {
+        tokenIn: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        tokenOut: "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599",
+        amountIn: "100000000",
+        minOut: "165000",
+        chainId: 1,
+      },
+    },
+    signatures: {},
+  };
+
+  const swapReceipt: Receipt = {
+    txHash: "0x" + "dead".padStart(64, "0"),
+    chainId: 1,
+    executedAt: now.toISOString(),
+    tokenIn: swapMandate.core!.payload.tokenIn as string,
+    tokenOut: swapMandate.core!.payload.tokenOut as string,
+    amountIn: "100000000",
+    amountOut: "165000",
+    executorAddress: serverWallet.address,
+  };
+
+  const swapResult = await primitiveReceiptVerifier.verify(
+    swapMandate,
+    swapReceipt,
+  );
+
+  // eslint-disable-next-line no-console
+  console.log(
+    "Primitive Receipt Verifier (swap@1 with fake txHash – expected score 0, notes about tx not found):",
+    JSON.stringify(swapResult, null, 2),
   );
 }
 
