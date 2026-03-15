@@ -1,4 +1,4 @@
-# Verification + Reputation on ERC-8004 (DevRel Guide)
+# Verification + Reputation on ERC-8004 
 
   
 
