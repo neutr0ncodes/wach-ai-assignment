@@ -11,6 +11,10 @@ import { logger } from "./router/logger.js";
 import { buildResponse, buildResponseUri } from "./router/responseBuilder.js";
 import { submitValidationResponse } from "./router/submitResponse.js";
 import { aggregateScores, getVerifiersForKind } from "./router/verifierRegistry.js";
+import {
+  fetchTrustByAgentId,
+  badgeColorForScore,
+} from "./router/trustFetcher.js";
 
 const processedRequests = new Set<string>();
 
@@ -77,8 +81,8 @@ async function handleValidation(
 const app = express();
 app.use(express.json());
 
-// POST /validate — accepts validation requests from ERC-8004
-app.post("/validate", (req: Request, res: Response) => {
+// POST /validate — accepts validation requests from ERC-8004 (only route that needs JSON body)
+app.post("/validate", express.json(), (req: Request, res: Response) => {
   const { requestHash, requestURI } = req.body as {
     requestHash?: string;
     requestURI?: string;
@@ -105,6 +109,51 @@ app.post("/validate", (req: Request, res: Response) => {
 // GET /health — liveness check
 app.get("/health", (_req: Request, res: Response) => {
   res.json({ status: "ok", router: env.ROUTER_ADDRESS ?? "not configured" });
+});
+
+// GET /trust/:agentId — agent reputation from Validation Registry
+app.get("/trust/:agentId", async (req: Request, res: Response) => {
+  const agentId = typeof req.params.agentId === "string" ? req.params.agentId : req.params.agentId?.[0];
+  if (!agentId) {
+    res.status(400).json({ error: "Missing agentId" });
+    return;
+  }
+  const data = await fetchTrustByAgentId(agentId);
+  if (data === null) {
+    res.status(404).json({ error: "Agent not found or invalid agentId" });
+    return;
+  }
+  res.json(data);
+});
+
+// GET /trust/:agentId/badge — Shields.io-compatible JSON badge
+app.get("/trust/:agentId/badge", async (req: Request, res: Response) => {
+  const agentId = typeof req.params.agentId === "string" ? req.params.agentId : req.params.agentId?.[0];
+  if (!agentId) {
+    res.status(400).json({
+      schemaVersion: 1,
+      label: "trust score",
+      message: "unknown",
+      color: "grey",
+    });
+    return;
+  }
+  const data = await fetchTrustByAgentId(agentId);
+  if (data === null) {
+    res.status(404).json({
+      schemaVersion: 1,
+      label: "trust score",
+      message: "unknown",
+      color: "grey",
+    });
+    return;
+  }
+  res.json({
+    schemaVersion: 1,
+    label: "trust score",
+    message: `${data.latestScore}/100`,
+    color: badgeColorForScore(data.latestScore),
+  });
 });
 
 // Cached test payload so the hash stays stable across requests
