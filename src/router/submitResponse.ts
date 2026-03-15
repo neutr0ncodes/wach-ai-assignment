@@ -22,6 +22,10 @@ export async function submitValidationResponse(
   responseHash: string,
   tag: string,
 ): Promise<string> {
+  if (env.DEMO_MODE) {
+    return `0xdemo_response_${requestHash.slice(2, 18)}`;
+  }
+
   if (!env.PRIVATE_KEY || !env.REGISTRY_ADDRESS) {
     logger.warn("PRIVATE_KEY or REGISTRY_ADDRESS not set; skipping on-chain submission.");
     return "0x(skipped)";
@@ -77,4 +81,52 @@ export async function submitValidationResponse(
   }
 
   throw lastError;
+}
+
+export async function submitValidationRequest(
+  routerAddress: string,
+  agentId: number | bigint,
+  requestURI: string,
+  requestHash: string,
+): Promise<string> {
+  if (env.DEMO_MODE) {
+    return `0xdemo_request_${requestHash.slice(2, 18)}`;
+  }
+
+  if (!env.PRIVATE_KEY || !env.REGISTRY_ADDRESS) {
+    logger.warn("PRIVATE_KEY or REGISTRY_ADDRESS not set; skipping on-chain submission.");
+    return "0x(skipped)";
+  }
+
+  const provider = new ethers.JsonRpcProvider(env.RPC_URL);
+  const wallet = new ethers.Wallet(env.PRIVATE_KEY, provider);
+  const registry = getRegistryContract(env.REGISTRY_ADDRESS, wallet);
+
+  const txNonce = await getNextNonce(wallet);
+  const gasEstimate = await registry.validationRequest!.estimateGas(
+    routerAddress,
+    agentId,
+    requestURI,
+    requestHash,
+  );
+
+  const tx = await registry.validationRequest!(
+    routerAddress,
+    agentId,
+    requestURI,
+    requestHash,
+    { nonce: txNonce, gasLimit: (gasEstimate * 120n) / 100n },
+  );
+
+  logger.info(
+    { txHash: tx.hash, requestHash, agentId: String(agentId) },
+    "validationRequest tx sent",
+  );
+
+  const receipt = await tx.wait();
+  logger.info(
+    { txHash: tx.hash, blockNumber: receipt?.blockNumber },
+    "validationRequest tx confirmed",
+  );
+  return tx.hash as string;
 }

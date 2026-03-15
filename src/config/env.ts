@@ -28,6 +28,10 @@ const envSchema = z.object({
     emptyStringToUndefined,
     z.string().regex(/^\d+$/).optional(),
   ),
+  DEMO_MODE: z.preprocess(
+    emptyStringToUndefined,
+    z.enum(["true", "false"]).optional(),
+  ),
 });
 
 const parsed = envSchema.parse(process.env);
@@ -46,4 +50,5 @@ export const env = {
   ROUTER_ADDRESS: routerAddress,
   PORT: parseInt(parsed.PORT ?? "3000", 10),
   POLL_INTERVAL_MS: parseInt(parsed.POLL_INTERVAL_MS ?? "15000", 10),
+  DEMO_MODE: parsed.DEMO_MODE === "true",
 } as const;

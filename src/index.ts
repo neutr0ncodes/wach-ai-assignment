@@ -9,10 +9,19 @@ import type { VerifierResult } from "./verifiers/types.js";
 import { fetchPayload } from "./router/fetchPayload.js";
 import { logger } from "./router/logger.js";
 import { buildResponse, buildResponseUri } from "./router/responseBuilder.js";
-import { submitValidationResponse } from "./router/submitResponse.js";
+import { submitValidationRequest, submitValidationResponse } from "./router/submitResponse.js";
 import { aggregateScores, getVerifiersForKind } from "./router/verifierRegistry.js";
+import { getDemoTrustByAgentId, recordDemoValidation } from "./router/demoTrustStore.js";
 
 const processedRequests = new Set<string>();
+const IPFS_GATEWAY = "https://gateway.pinata.cloud/ipfs/";
+
+function resolveUri(uri: string): string {
+  if (uri.startsWith("ipfs://")) {
+    return IPFS_GATEWAY + uri.slice("ipfs://".length);
+  }
+  return uri;
+}
 
 async function handleValidation(
   requestHash: string,
@@ -59,6 +68,18 @@ async function handleValidation(
       "Validation complete",
     );
 
+    if (env.DEMO_MODE) {
+      recordDemoValidation({
+        agentId,
+        requestHash,
+        score: finalScore,
+        kind,
+        mandateId: mandate.mandateId,
+        breakdown: results,
+      });
+      log.info({ agentId, requestHash, finalScore }, "Stored validation result in demo trust store");
+    }
+
     const txHash = await submitValidationResponse(
       requestHash,
       finalScore,
@@ -77,34 +98,139 @@ async function handleValidation(
 const app = express();
 app.use(express.json());
 
-// POST /validate — accepts validation requests from ERC-8004
-app.post("/validate", (req: Request, res: Response) => {
-  const { requestHash, requestURI } = req.body as {
+// POST /validate — supports:
+// 1) ERC-8004 callback shape: { requestHash, requestURI }
+// 2) Dev/manual shape: { agentId, requestURI } (submits validationRequest automatically)
+app.post("/validate", async (req: Request, res: Response) => {
+  const { requestHash, requestURI, agentId } = req.body as {
     requestHash?: string;
     requestURI?: string;
+    agentId?: string | number;
   };
 
-  if (!requestHash || !requestURI) {
-    res.status(400).json({ error: "Missing requestHash or requestURI" });
+  if (!requestURI || requestURI.trim() === "") {
+    res.status(400).json({ error: "Missing requestURI" });
     return;
   }
 
-  if (processedRequests.has(requestHash)) {
-    logger.info({ requestHash }, "Duplicate request, skipping");
-    res.status(200).json({ status: "already_processed", requestHash });
+  const uri = requestURI.trim();
+  const hashFromBody = typeof requestHash === "string" ? requestHash.trim() : "";
+
+  // Standard on-chain callback path.
+  if (hashFromBody) {
+    if (processedRequests.has(hashFromBody)) {
+      logger.info({ requestHash: hashFromBody }, "Duplicate request, skipping");
+      res.status(200).json({ status: "already_processed", requestHash: hashFromBody });
+      return;
+    }
+
+    processedRequests.add(hashFromBody);
+    res.status(202).json({ status: "accepted", requestHash: hashFromBody });
+    void handleValidation(hashFromBody, uri);
     return;
   }
 
-  processedRequests.add(requestHash);
+  // Dev/manual path: compute hash, submit validationRequest, then validate/respond.
+  if (agentId === undefined || agentId === null || agentId === "") {
+    res.status(400).json({ error: "Missing requestHash or agentId" });
+    return;
+  }
+  if (!env.ROUTER_ADDRESS) {
+    res.status(500).json({ error: "ROUTER_ADDRESS is not configured" });
+    return;
+  }
 
-  res.status(202).json({ status: "accepted", requestHash });
+  const parsedAgentId =
+    typeof agentId === "number"
+      ? agentId
+      : Number.parseInt(String(agentId), 10);
 
-  void handleValidation(requestHash, requestURI);
+  if (!Number.isInteger(parsedAgentId) || parsedAgentId < 0) {
+    res.status(400).json({ error: "agentId must be a non-negative integer" });
+    return;
+  }
+
+  const payloadRes = await fetch(resolveUri(uri));
+  if (!payloadRes.ok) {
+    res.status(400).json({
+      error: `Failed to fetch payload from ${uri}: ${payloadRes.status} ${payloadRes.statusText}`,
+    });
+    return;
+  }
+  const bodyBytes = new Uint8Array(await payloadRes.arrayBuffer());
+  const computedHash = ethers.sha256(bodyBytes);
+
+  if (processedRequests.has(computedHash)) {
+    logger.info({ requestHash: computedHash }, "Duplicate request, skipping");
+    res.status(200).json({ status: "already_processed", requestHash: computedHash });
+    return;
+  }
+  processedRequests.add(computedHash);
+
+  res.status(202).json({
+    status: "accepted",
+    mode: "manual",
+    requestHash: computedHash,
+    requestURI: uri,
+  });
+
+  void (async () => {
+    try {
+      if (!env.DEMO_MODE) {
+        const requestTxHash = await submitValidationRequest(
+          env.ROUTER_ADDRESS!,
+          parsedAgentId,
+          uri,
+          computedHash,
+        );
+        logger.info(
+          { requestHash: computedHash, txHash: requestTxHash, agentId: parsedAgentId },
+          "validationRequest submitted (manual path)",
+        );
+      } else {
+        logger.info(
+          { requestHash: computedHash, agentId: parsedAgentId },
+          "Demo mode active: skipping on-chain validationRequest",
+        );
+      }
+      await handleValidation(computedHash, uri);
+    } catch (err) {
+      processedRequests.delete(computedHash);
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(
+        { requestHash: computedHash, error: msg, agentId: parsedAgentId },
+        "Manual validation flow failed",
+      );
+    }
+  })();
+});
+
+// GET /trust/:agentId — demo trust snapshot
+app.get("/trust/:agentId", (req: Request, res: Response) => {
+  if (!env.DEMO_MODE) {
+    res.status(501).json({
+      error: "Trust endpoint is demo-only in this build. Set DEMO_MODE=true.",
+    });
+    return;
+  }
+
+  const agentId = typeof req.params.agentId === "string" ? req.params.agentId : req.params.agentId?.[0];
+  if (!agentId) {
+    res.status(400).json({ error: "Missing agentId" });
+    return;
+  }
+
+  const data = getDemoTrustByAgentId(agentId);
+  if (!data) {
+    res.status(404).json({ error: "No demo validations found for this agentId" });
+    return;
+  }
+  res.json(data);
 });
 
 // GET /health — liveness check
 app.get("/health", (_req: Request, res: Response) => {
-  res.json({ status: "ok", router: env.ROUTER_ADDRESS ?? "not configured" });
+  res.json({ status: "ok", router: env.ROUTER_ADDRESS ?? "not configured", demoMode: env.DEMO_MODE });
 });
 
 // Cached test payload so the hash stays stable across requests
@@ -182,7 +308,7 @@ app.listen(env.PORT, () => {
 });
 
 // --- On-chain poller (5.3 / 5.4) ---
-if (env.RPC_URL && env.REGISTRY_ADDRESS && env.ROUTER_ADDRESS) {
+if (!env.DEMO_MODE && env.RPC_URL && env.REGISTRY_ADDRESS && env.ROUTER_ADDRESS) {
   const provider = new ethers.JsonRpcProvider(env.RPC_URL);
   const poller = new ValidationPoller(provider, env.REGISTRY_ADDRESS, env.ROUTER_ADDRESS);
 
@@ -199,9 +325,10 @@ if (env.RPC_URL && env.REGISTRY_ADDRESS && env.ROUTER_ADDRESS) {
       logger.error({ error: msg }, "Failed to start validation poller");
     });
 } else {
-  logger.warn(
-    "On-chain poller disabled: set RPC_URL, REGISTRY_ADDRESS, and ROUTER_ADDRESS to enable",
-  );
+  const reason = env.DEMO_MODE
+    ? "On-chain poller disabled in demo mode"
+    : "On-chain poller disabled: set RPC_URL, REGISTRY_ADDRESS, and ROUTER_ADDRESS to enable";
+  logger.warn(reason);
 }
 
 export { app };
